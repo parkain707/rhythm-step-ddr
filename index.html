@@ -151,10 +151,11 @@
   </div>
   <h1 class="title">RHYTHM STEP</h1>
   <p class="subtitle">화살표가 판정선에 닿을 때 방향키를 누르세요!</p>
-  <input id="login-name" class="input" placeholder="이름 (기록에 표시됩니다)" maxlength="12" autocomplete="off">
-  <button id="btn-login" class="btn">게임 시작하기</button>
+  <input id="login-name" class="input" placeholder="이름" maxlength="12" autocomplete="off">
+  <input id="login-pw" class="input" type="password" placeholder="비밀번호" maxlength="24">
+  <button id="btn-login" class="btn">시작하기</button>
   <p id="login-msg" class="msg"></p>
-  <p class="hint">이름은 이 기기에서 게임 기록을 구분하는 데만 쓰이며,<br>회원가입 없이 바로 시작할 수 있습니다.</p>
+  <p class="hint">처음 쓰는 이름은 비밀번호와 함께 자동으로 저장되어 바로 시작됩니다.<br>다시 접속할 때는 같은 이름과 비밀번호를 입력하면 내 기록을 이어갈 수 있습니다.</p>
   <div class="help-panel">
     <h3>GAME PLAY · 게임 방법</h3>
     <ol>
@@ -162,7 +163,7 @@
       <li><b>PC</b>: 방향키(↑↓←→) 또는 WASD &nbsp;·&nbsp; <b>모바일</b>: 화면 하단 화살표 터치</li>
       <li>판정 — <span style="color:#ffd43b;font-weight:700">PERFECT</span> 300점 · <span style="color:#4dabf7;font-weight:700">GREAT</span> 100점 · <span style="color:#ff6b6b;font-weight:700">MISS</span>(콤보 리셋)</li>
       <li>난이도 4단계: 쉬움(BPM 100)부터 극한(BPM 168)까지. 올라갈수록 노트가 빠르고 촘촘해집니다.</li>
-      <li>플레이 결과(점수·정확도·등급·콤보)는 이름별로 저장되며, 메뉴의 <b>기록 보기</b>에서 확인할 수 있습니다.</li>
+      <li>플레이 결과(점수·정확도·등급·콤보)는 이름·비밀번호 계정별로 저장되며, 메뉴의 <b>기록 보기</b>에서 확인할 수 있습니다.</li>
       <li>게임 중 <b>Esc</b> 또는 일시정지 버튼으로 쉴 수 있습니다.</li>
     </ol>
   </div>
@@ -172,7 +173,7 @@
   <h2 id="menu-welcome"></h2>
   <button id="btn-play" class="btn">게임 시작</button>
   <button id="btn-history" class="btn ghost">기록 보기</button>
-  <button id="btn-logout" class="btn ghost">이름 바꾸기</button>
+  <button id="btn-logout" class="btn ghost">로그아웃</button>
   <div class="best-box">
     <h3>최고 기록</h3>
     <div id="menu-best"></div>
@@ -215,6 +216,7 @@
   <p id="result-diff" class="subtitle"></p>
   <div class="stats">
     <div class="row"><span>점수</span><b id="result-score"></b></div>
+    <div class="row"><span>최고 점수</span><b id="result-best"></b></div>
     <div class="row"><span>정확도</span><b id="result-acc"></b></div>
     <div class="row"><span>최대 콤보</span><b id="result-combo"></b></div>
     <div class="row"><span>PERFECT / GREAT / MISS</span><b id="result-pgm"></b></div>
@@ -262,11 +264,28 @@ function mulberry32(a) {
   };
 }
 
+function fnv1a(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
 const DB = {
   read(k, def) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : def; } catch (e) { return def; } },
   write(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } }
 };
-const histKey = 'rs_history', sessKey = 'rs_session';
+const usersKey = 'rs_users', histKey = 'rs_history', sessKey = 'rs_session';
+
+async function hashPw(pw, salt) {
+  const data = salt + '::' + pw;
+  try {
+    if (window.crypto && crypto.subtle) {
+      const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(data));
+      return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+  } catch (e) {}
+  return fnv1a(data) + fnv1a(data + '#');
+}
 
 let currentUser = null;
 
@@ -275,17 +294,29 @@ function showScreen(id) {
   $('#btn-pause').classList.toggle('show', id === 'screen-game');
 }
 
-function loginSubmit() {
+async function loginSubmit() {
   const name = $('#login-name').value.trim();
+  const pw = $('#login-pw').value;
   const msg = $('#login-msg');
   msg.textContent = '';
-  if (!name) { msg.textContent = '이름을 입력하세요.'; return; }
+  if (!name || !pw) { msg.textContent = '이름과 비밀번호를 모두 입력하세요.'; return; }
+  const users = DB.read(usersKey, {});
+  if (users[name]) {
+    const h = await hashPw(pw, users[name].salt);
+    if (h !== users[name].hash) { msg.textContent = '비밀번호가 일치하지 않습니다.'; return; }
+  } else {
+    const salt = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    users[name] = { salt, hash: await hashPw(pw, salt) };
+    if (!DB.write(usersKey, users)) { msg.textContent = '저장 공간을 사용할 수 없습니다.'; return; }
+  }
   DB.write(sessKey, name);
   currentUser = name;
   enterMenu();
 }
 $('#btn-login').addEventListener('click', loginSubmit);
-$('#login-name').addEventListener('keydown', e => { if (e.key === 'Enter') loginSubmit(); });
+[$('#login-name'), $('#login-pw')].forEach(el =>
+  el.addEventListener('keydown', e => { if (e.key === 'Enter') loginSubmit(); })
+);
 
 function enterMenu() {
   showScreen('screen-menu');
@@ -302,6 +333,7 @@ function enterMenu() {
 $('#btn-logout').addEventListener('click', () => {
   DB.write(sessKey, null);
   currentUser = null;
+  $('#login-pw').value = '';
   showScreen('screen-login');
 });
 $('#btn-play').addEventListener('click', () => showScreen('screen-diff'));
@@ -440,7 +472,7 @@ function genChart(diff, bars) {
 
 const G = {
   state: 'idle', diff: null, notes: [], startAt: 0, travel: 2000, songDur: 0,
-  score: 0, combo: 0, maxCombo: 0,
+  score: 0, combo: 0, maxCombo: 0, personalBest: 0,
   counts: { perfect: 0, great: 0, miss: 0 },
   lastJudge: null, lastJudgeAt: 0, laneFlash: [0, 0, 0, 0], raf: 0, pauseAt: 0
 };
@@ -460,6 +492,8 @@ function startGame(diff) {
   const d = DIFFS[diff];
   G.diff = diff;
   G.travel = d.travel;
+  const best = bestPerDiff();
+  G.personalBest = best[diff] ? best[diff].score : 0;
   const bars = TEST_MODE ? 4 : Math.round(d.secs / (4 * 60 / d.bpm));
   G.songDur = bars * 4 * 60 / d.bpm;
   G.notes = genChart(diff, bars);
@@ -583,19 +617,23 @@ function render(st) {
   ctx.textBaseline = 'alphabetic';
   ctx.textAlign = 'left';
   ctx.fillStyle = 'rgba(255,255,255,0.5)'; ctx.font = '600 11px sans-serif';
-  ctx.fillText('SCORE', playX, 28);
-  ctx.fillStyle = '#fff'; ctx.font = '900 24px sans-serif';
-  ctx.fillText(G.score.toLocaleString(), playX, 54);
+  ctx.fillText('SCORE', playX, 26);
+  ctx.fillStyle = '#fff'; ctx.font = '900 26px sans-serif';
+  ctx.fillText(G.score.toLocaleString(), playX, 53);
   const acc = accuracy();
   ctx.textAlign = 'right';
   ctx.fillStyle = 'rgba(255,255,255,0.5)'; ctx.font = '600 11px sans-serif';
-  ctx.fillText('정확도', playX + playW, 28);
+  ctx.fillText('정확도', playX + playW, 26);
   ctx.fillStyle = acc >= 90 ? '#3ddc84' : '#fff'; ctx.font = '900 22px sans-serif';
-  ctx.fillText(acc.toFixed(1) + '%', playX + playW, 53);
+  ctx.fillText(acc.toFixed(1) + '%', playX + playW, 52);
+  const isRecord = G.personalBest > 0 && G.score > G.personalBest;
+  ctx.fillStyle = isRecord ? '#ffd43b' : 'rgba(255,255,255,0.5)';
+  ctx.font = '700 12px sans-serif';
+  ctx.fillText(isRecord ? '신기록 달성 중!' : (G.personalBest > 0 ? '내 최고 ' + G.personalBest.toLocaleString() : '이 난이도 첫 도전'), playX + playW, 72);
   ctx.textAlign = 'center';
   const barW = playW * Math.max(0, Math.min(1, st / G.songDur));
-  ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fillRect(playX, 64, playW, 4);
-  ctx.fillStyle = DIFFS[G.diff].color; ctx.fillRect(playX, 64, barW, 4);
+  ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fillRect(playX, 80, playW, 4);
+  ctx.fillStyle = DIFFS[G.diff].color; ctx.fillRect(playX, 80, barW, 4);
 
   if (G.combo >= 2) {
     ctx.font = '900 40px sans-serif';
@@ -652,6 +690,9 @@ function finishGame() {
   ge.style.color = gradeColors[grade];
   $('#result-diff').textContent = DIFFS[G.diff].label + ' 난이도 결과';
   $('#result-score').textContent = G.score.toLocaleString() + ' 점';
+  $('#result-best').textContent = G.personalBest > 0
+    ? (G.score > G.personalBest ? '신기록! (이전 ' + G.personalBest.toLocaleString() + ' 점)' : G.personalBest.toLocaleString() + ' 점')
+    : '첫 기록';
   $('#result-acc').textContent = acc.toFixed(1) + '%';
   $('#result-combo').textContent = G.maxCombo + ' 콤보';
   $('#result-pgm').textContent = c.perfect + ' / ' + c.great + ' / ' + c.miss;
@@ -738,7 +779,7 @@ function renderHistory() {
 
 (function init() {
   const sess = DB.read(sessKey, null);
-  if (sess) {
+  if (sess && DB.read(usersKey, {})[sess]) {
     currentUser = sess;
     enterMenu();
   }
