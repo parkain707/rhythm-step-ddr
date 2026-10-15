@@ -474,7 +474,8 @@ const G = {
   state: 'idle', diff: null, notes: [], startAt: 0, travel: 2000, songDur: 0,
   score: 0, combo: 0, maxCombo: 0, personalBest: 0,
   counts: { perfect: 0, great: 0, miss: 0 },
-  lastJudge: null, lastJudgeAt: 0, laneFlash: [0, 0, 0, 0], raf: 0, pauseAt: 0
+  lastJudge: null, lastJudgeAt: 0, laneFlash: [0, 0, 0, 0], raf: 0, pauseAt: 0,
+  lastSuccessHit: null, lastGhostTapAt: 0
 };
 
 const cv = $('#game-canvas'), ctx = cv.getContext('2d');
@@ -500,6 +501,8 @@ function startGame(diff) {
   G.score = 0; G.combo = 0; G.maxCombo = 0;
   G.counts = { perfect: 0, great: 0, miss: 0 };
   G.lastJudge = null;
+  G.lastSuccessHit = null;
+  G.lastGhostTapAt = 0;
   G.state = 'countdown';
   resize();
   showScreen('screen-game');
@@ -536,7 +539,8 @@ function judge(text) {
 
 function hitLane(lane) {
   if (G.state !== 'playing') return;
-  G.laneFlash[lane] = performance.now();
+  const now = performance.now();
+  G.laneFlash[lane] = now;
   const st = songTime();
   let best = null, bd = GREAT_W + 0.01;
   for (const n of G.notes) {
@@ -544,13 +548,75 @@ function hitLane(lane) {
     const dd = Math.abs(n.time - st);
     if (dd < bd) { bd = dd; best = n; }
   }
-  if (!best) return;
-  best.hit = true; best.judged = true;
+
+  // 1. 해당 레인에 판정 가능한 노트가 없는 경우 (공타 / 헛누름)
+  if (!best) {
+    let earlyNote = null, earlyDist = 0.35;
+    for (const n of G.notes) {
+      if (n.lane !== lane || n.hit || n.judged) continue;
+      const dt = n.time - st;
+      if (dt > 0 && dt < earlyDist) { earlyDist = dt; earlyNote = n; }
+    }
+    if (earlyNote) {
+      earlyNote.judged = true;
+    }
+
+    // 직전 45ms 이내에 다른 레인 성공 판정이 있었다면(동시 다중키 편법 방지), 해당 성공을 MISS로 취소
+    if (G.lastSuccessHit && (now - G.lastSuccessHit.time < 45)) {
+      const prev = G.lastSuccessHit;
+      G.score -= prev.scoreAdd;
+      if (prev.judgeType === 'PERFECT') G.counts.perfect--;
+      else if (prev.judgeType === 'GREAT') G.counts.great--;
+      prev.note.hit = false;
+      prev.note.judged = true;
+      G.lastSuccessHit = null;
+    }
+
+    G.lastGhostTapAt = now;
+    G.counts.miss++;
+    G.combo = 0;
+    judge('MISS');
+    thudSnd();
+    return;
+  }
+
+  // 2. 판정 범위 내 노트가 있으나 직전 45ms 이내에 헛누름이 있었던 경우 (동시 다중키 입력)
+  if (now - G.lastGhostTapAt < 45) {
+    best.hit = false;
+    best.judged = true;
+    G.counts.miss++;
+    G.combo = 0;
+    judge('MISS');
+    thudSnd();
+    return;
+  }
+
+  // 3. 정상 적중
+  best.hit = true;
+  best.judged = true;
   G.combo++;
   if (G.combo > G.maxCombo) G.maxCombo = G.combo;
-  if (bd <= PERFECT_W) { G.counts.perfect++; G.score += 300; judge('PERFECT'); }
-  else { G.counts.great++; G.score += 100; judge('GREAT'); }
+
+  let scoreAdd = 0, judgeType = '';
+  if (bd <= PERFECT_W) {
+    judgeType = 'PERFECT';
+    scoreAdd = 300;
+    G.counts.perfect++;
+  } else {
+    judgeType = 'GREAT';
+    scoreAdd = 100;
+    G.counts.great++;
+  }
+  G.score += scoreAdd;
+  judge(judgeType);
   tickSnd();
+
+  G.lastSuccessHit = {
+    time: now,
+    note: best,
+    scoreAdd: scoreAdd,
+    judgeType: judgeType
+  };
 }
 
 function accuracy() {
